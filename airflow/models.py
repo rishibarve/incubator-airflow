@@ -1463,14 +1463,18 @@ class TaskInstance(Base):
             "Log file: {self.log_filepath}<br>"
         ).format(**locals())
         json_obj = {
-            'job_type' : 'airflow-job',
+            'job_type' : 'airflow-job-%s'%self.dag_id,
             'name' : self.dag_id,
             'instance' : str(self.execution_date),
             'status' : 'FAILED',
             'message' : message
         }
-        URL = "http://analytics.hike.in/job_execution"#+str(datetime.now().strftime('%Y-%m-%d-%H'))
+        command = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
+        os.system(command)
+        URL = "http://analytics-staging.hike.in/job_execution"
         response = requests.post(URL, json=json_obj)
+        return
+
 
 
     def set_duration(self):
