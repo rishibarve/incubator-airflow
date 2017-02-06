@@ -1460,8 +1460,7 @@ class TaskInstance(Base):
             "Exception:{exception}\n"
             "Log: {self.log_url} Link\n"
             "Host: {self.hostname}\n"
-            "Log file: {self.log_filepath}"
-            "############################"
+            "Log file: {self.log_filepath}\n\n\n"
         ).format(**locals())
         json_obj = {
             'job_type' : 'airflow-job-%s'%self.dag_id,
@@ -1470,12 +1469,19 @@ class TaskInstance(Base):
             'status' : 'FAILED',
             'message' : message
         }
-        command = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
-        command = "echo '%s' >> /mnt/airflow_job_alerts/logs;"%(message)
-        os.system(command)
-        URL = "http://analytics-staging.hike.in/job_execution"
-        response = requests.post(URL, json=json_obj)
-        return
+        command1 = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
+        command2 = "echo '%s' >> /mnt/airflow_job_alerts/logs;"%(message)
+        try:
+            os.system(command1)
+            os.system(command2)
+        except:
+            print("Internal Error : Can not write to nagios-files")
+
+        try:
+            URL = "http://analytics-staging.hike.in/job_execution"
+            response = requests.post(URL, json=json_obj)
+        except:
+            print("Error : Can not post job-status API")
 
 
     def set_duration(self):
