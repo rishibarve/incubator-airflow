@@ -1440,12 +1440,12 @@ class TaskInstance(Base):
         exception = str(exception).replace('\n', '<br>')
         try_ = task.retries + 1
         body = (
-            "Airflow alert: {self}"
-            "Try {self.try_number} out of {try_}<br>"
-            "Exception:<br>{exception}<br>"
-            "Log: <a href='{self.log_url}'>Link</a><br>"
-            "Host: {self.hostname}<br>"
-            "Log file: {self.log_filepath}<br>"
+            "Airflow alert: {self}\n"
+            "Try {self.try_number} out of {try_}\n"
+            "Exception:{exception}\n"
+            "Log: {self.log_url}\n"
+            "Host: {self.hostname}\n"
+            "Log file: {self.log_filepath}"
         ).format(**locals())
         requests.post("https://hooks.slack.com/services/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",
                       json={'channel': '#firehose', 'attachments': [{'text': body}]})
@@ -1455,12 +1455,13 @@ class TaskInstance(Base):
         exception = str(exception).replace('\n', '<br>')
         try_ = task.retries + 1
         message = (
-            "Airflow alert: {self}"
-            "Try {self.try_number} out of {try_}<br>"
-            "Exception:<br>{exception}<br>"
-            "Log: <a href='{self.log_url}'>Link</a><br>"
-            "Host: {self.hostname}<br>"
-            "Log file: {self.log_filepath}<br>"
+            "Airflow alert: {self}\n"
+            "Try {self.try_number} out of {try_}\n"
+            "Exception:{exception}\n"
+            "Log: {self.log_url} Link\n"
+            "Host: {self.hostname}\n"
+            "Log file: {self.log_filepath}"
+            "############################"
         ).format(**locals())
         json_obj = {
             'job_type' : 'airflow-job-%s'%self.dag_id,
@@ -1470,11 +1471,11 @@ class TaskInstance(Base):
             'message' : message
         }
         command = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
+        command = "echo '%s' >> /mnt/airflow_job_alerts/logs;"%(message)
         os.system(command)
         URL = "http://analytics-staging.hike.in/job_execution"
         response = requests.post(URL, json=json_obj)
         return
-
 
 
     def set_duration(self):
