@@ -1470,7 +1470,7 @@ class TaskInstance(Base):
             'message' : message
         }
         command1 = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
-        command2 = "echo '%s' >> /mnt/airflow_job_alerts/logs;"%(message)
+        command2 = "echo '%s' >> /mnt/airflow_job_alert_logs;"%(message)
         try:
             os.system(command1)
             os.system(command2)
@@ -1748,7 +1748,7 @@ class BaseOperator(object):
             slack_alert_on_retry=False,
             slack_alert_on_failure=False,
             nagios_alert_on_retry=False,
-            nagios_alert_on_failure=False,
+            nagios_alert_on_failure=True,
             retries=0,
             retry_delay=timedelta(seconds=300),
             start_date=None,
