@@ -18,12 +18,14 @@ from __future__ import unicode_literals
 
 from future.standard_library import install_aliases
 
+
 install_aliases()
 from builtins import str
 from builtins import object, bytes
 import copy
 from datetime import datetime, timedelta
 import dill
+import requests
 import functools
 import getpass
 import imp
@@ -1298,6 +1300,10 @@ class TaskInstance(Base):
                 logging.info('Marking task as UP_FOR_RETRY')
                 if task.email_on_retry and task.email:
                     self.email_alert(error, is_retry=True)
+                if task.slack_alert_on_retry:
+                    self.slack_alert(error, is_retry=True)
+                if task.nagios_alert_on_retry:
+                    self.nagios_alert(error, is_retry=True)
             else:
                 self.state = State.FAILED
                 if task.retries:
@@ -1306,10 +1312,15 @@ class TaskInstance(Base):
                     logging.info('Marking task as FAILED.')
                 if task.email_on_failure and task.email:
                     self.email_alert(error, is_retry=False)
+                if task.slack_alert_on_failure:
+                    self.slack_alert(error, is_retry=False)
+                if task.nagios_alert_on_failure:
+                    self.nagios_alert(error, is_retry=False)
         except Exception as e2:
             logging.error(
                 'Failed to send email to: ' + str(task.email))
             logging.exception(e2)
+
 
         # Handling callbacks pessimistically
         try:
@@ -1423,6 +1434,55 @@ class TaskInstance(Base):
             "Mark success: <a href='{self.mark_success_url}'>Link</a><br>"
         ).format(**locals())
         send_email(task.email, title, body)
+
+    def slack_alert(self,exception, is_retry=False):
+        task = self.task
+        exception = str(exception).replace('\n', '<br>')
+        try_ = task.retries + 1
+        body = (
+            "Airflow alert: {self}\n"
+            "Try {self.try_number} out of {try_}\n"
+            "Exception:{exception}\n"
+            "Log: {self.log_url}\n"
+            "Host: {self.hostname}\n"
+            "Log file: {self.log_filepath}"
+        ).format(**locals())
+        requests.post("https://hooks.slack.com/services/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",
+                      json={'channel': '#firehose', 'attachments': [{'text': body}]})
+
+    def nagios_alert(self,exception, is_retry=False):
+        task = self.task
+        exception = str(exception).replace('\n', '<br>')
+        try_ = task.retries + 1
+        message = (
+            "Airflow alert: {self}\n"
+            "Try {self.try_number} out of {try_}\n"
+            "Exception:{exception}\n"
+            "Log: {self.log_url} Link\n"
+            "Host: {self.hostname}\n"
+            "Log file: {self.log_filepath}\n\n\n"
+        ).format(**locals())
+        json_obj = {
+            'job_type' : 'airflow-job-%s'%self.dag_id,
+            'name' : self.dag_id,
+            'instance' : str(self.execution_date),
+            'status' : 'FAILED',
+            'message' : message
+        }
+        command1 = "mkdir -p /mnt/airflow_job_alerts;echo '%s' >> /mnt/airflow_job_alerts/'%s';"%(json_obj['name'],datetime.now().strftime('%Y_%m_%d_%H'))
+        command2 = "echo '%s' >> /mnt/airflow_job_alert_logs;"%(message)
+        try:
+            os.system(command1)
+            os.system(command2)
+        except:
+            print("Internal Error : Can not write to nagios-files")
+
+        try:
+            URL = "http://analytics-staging.hike.in/job_execution"
+            response = requests.post(URL, json=json_obj)
+        except:
+            print("Error : Can not post job-status API")
+
 
     def set_duration(self):
         if self.end_date and self.start_date:
@@ -1685,6 +1745,10 @@ class BaseOperator(object):
             email=None,
             email_on_retry=True,
             email_on_failure=True,
+            slack_alert_on_retry=False,
+            slack_alert_on_failure=False,
+            nagios_alert_on_retry=False,
+            nagios_alert_on_failure=True,
             retries=0,
             retry_delay=timedelta(seconds=300),
             start_date=None,
@@ -1724,6 +1788,10 @@ class BaseOperator(object):
         self.owner = owner
         self.email = email
         self.email_on_retry = email_on_retry
+        self.slack_alert_on_retry = slack_alert_on_retry
+        self.slack_alert_on_failure = slack_alert_on_failure
+        self.nagios_alert_on_retry = nagios_alert_on_retry
+        self.nagios_alert_on_failure = nagios_alert_on_failure
         self.email_on_failure = email_on_failure
         self.start_date = start_date
         if start_date and not isinstance(start_date, datetime):
@@ -3401,3 +3469,4 @@ class ImportError(Base):
     timestamp = Column(DateTime)
     filename = Column(String(1024))
     stacktrace = Column(Text)
+
