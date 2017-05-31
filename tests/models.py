@@ -18,6 +18,7 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import datetime
+import logging
 import os
 import unittest
 import time
@@ -26,14 +27,16 @@ from airflow import models, settings, AirflowException
 from airflow.exceptions import AirflowSkipException
 from airflow.models import DAG, TaskInstance as TI
 from airflow.models import State as ST
-from airflow.models import DagModel
+from airflow.models import DagModel, DagStat
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.bash_operator import BashOperator
 from airflow.operators.python_operator import PythonOperator
+from airflow.operators.python_operator import ShortCircuitOperator
 from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep
 from airflow.utils.state import State
 from mock import patch
-from nose_parameterized import parameterized
+from parameterized import parameterized
+
 
 DEFAULT_DATE = datetime.datetime(2016, 1, 1)
 TEST_DAGS_FOLDER = os.path.join(
@@ -49,8 +52,8 @@ class DagTest(unittest.TestCase):
         """
         dag = models.DAG('test-dag')
 
-        assert type(dag.params) == dict
-        assert len(dag.params) == 0
+        self.assertEqual(dict, type(dag.params))
+        self.assertEqual(0, len(dag.params))
 
     def test_params_passed_and_params_in_default_args_no_override(self):
         """
@@ -68,7 +71,7 @@ class DagTest(unittest.TestCase):
 
         params_combined = params1.copy()
         params_combined.update(params2)
-        assert dag.params == params_combined
+        self.assertEqual(params_combined, dag.params)
 
     def test_dag_as_context_manager(self):
         """
@@ -117,12 +120,418 @@ class DagTest(unittest.TestCase):
         self.assertEqual(dag.dag_id, 'creating_dag_in_cm')
         self.assertEqual(dag.tasks[0].task_id, 'op6')
 
+    def test_dag_topological_sort(self):
+        dag = DAG(
+            'dag',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+
+        # A -> B
+        # A -> C -> D
+        # ordered: B, D, C, A or D, B, C, A or D, C, B, A
+        with dag:
+            op1 = DummyOperator(task_id='A')
+            op2 = DummyOperator(task_id='B')
+            op3 = DummyOperator(task_id='C')
+            op4 = DummyOperator(task_id='D')
+            op1.set_upstream([op2, op3])
+            op3.set_upstream(op4)
+
+        topological_list = dag.topological_sort()
+        logging.info(topological_list)
+
+        tasks = [op2, op3, op4]
+        self.assertTrue(topological_list[0] in tasks)
+        tasks.remove(topological_list[0])
+        self.assertTrue(topological_list[1] in tasks)
+        tasks.remove(topological_list[1])
+        self.assertTrue(topological_list[2] in tasks)
+        tasks.remove(topological_list[2])
+        self.assertTrue(topological_list[3] == op1)
+
+        dag = DAG(
+            'dag',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+
+        # C -> (A u B) -> D
+        # C -> E
+        # ordered: E | D, A | B, C
+        with dag:
+            op1 = DummyOperator(task_id='A')
+            op2 = DummyOperator(task_id='B')
+            op3 = DummyOperator(task_id='C')
+            op4 = DummyOperator(task_id='D')
+            op5 = DummyOperator(task_id='E')
+            op1.set_downstream(op3)
+            op2.set_downstream(op3)
+            op1.set_upstream(op4)
+            op2.set_upstream(op4)
+            op5.set_downstream(op3)
+
+        topological_list = dag.topological_sort()
+        logging.info(topological_list)
+
+        set1 = [op4, op5]
+        self.assertTrue(topological_list[0] in set1)
+        set1.remove(topological_list[0])
+
+        set2 = [op1, op2]
+        set2.extend(set1)
+        self.assertTrue(topological_list[1] in set2)
+        set2.remove(topological_list[1])
+
+        self.assertTrue(topological_list[2] in set2)
+        set2.remove(topological_list[2])
+
+        self.assertTrue(topological_list[3] in set2)
+
+        self.assertTrue(topological_list[4] == op3)
+
+        dag = DAG(
+            'dag',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+
+        self.assertEquals(tuple(), dag.topological_sort())
+
+    def test_get_num_task_instances(self):
+        test_dag_id = 'test_get_num_task_instances_dag'
+        test_task_id = 'task_1'
+
+        test_dag = DAG(dag_id=test_dag_id, start_date=DEFAULT_DATE)
+        test_task = DummyOperator(task_id=test_task_id, dag=test_dag)
+
+        ti1 = TI(task=test_task, execution_date=DEFAULT_DATE)
+        ti1.state = None
+        ti2 = TI(task=test_task, execution_date=DEFAULT_DATE + datetime.timedelta(days=1))
+        ti2.state = State.RUNNING
+        ti3 = TI(task=test_task, execution_date=DEFAULT_DATE + datetime.timedelta(days=2))
+        ti3.state = State.QUEUED
+        ti4 = TI(task=test_task, execution_date=DEFAULT_DATE + datetime.timedelta(days=3))
+        ti4.state = State.RUNNING
+        session = settings.Session()
+        session.merge(ti1)
+        session.merge(ti2)
+        session.merge(ti3)
+        session.merge(ti4)
+        session.commit()
+
+        self.assertEqual(0, DAG.get_num_task_instances(test_dag_id, ['fakename'],
+            session=session))
+        self.assertEqual(4, DAG.get_num_task_instances(test_dag_id, [test_task_id],
+            session=session))
+        self.assertEqual(4, DAG.get_num_task_instances(test_dag_id,
+            ['fakename', test_task_id], session=session))
+        self.assertEqual(1, DAG.get_num_task_instances(test_dag_id, [test_task_id],
+            states=[None], session=session))
+        self.assertEqual(2, DAG.get_num_task_instances(test_dag_id, [test_task_id],
+            states=[State.RUNNING], session=session))
+        self.assertEqual(3, DAG.get_num_task_instances(test_dag_id, [test_task_id],
+            states=[None, State.RUNNING], session=session))
+        self.assertEqual(4, DAG.get_num_task_instances(test_dag_id, [test_task_id],
+            states=[None, State.QUEUED, State.RUNNING], session=session))
+        session.close()
+
+    def test_render_template_field(self):
+        """Tests if render_template from a field works"""
+
+        dag = DAG('test-dag',
+                  start_date=DEFAULT_DATE)
+
+        with dag:
+            task = DummyOperator(task_id='op1')
+
+        result = task.render_template('', '{{ foo }}', dict(foo='bar'))
+        self.assertEqual(result, 'bar')
+
+    def test_render_template_field_macro(self):
+        """ Tests if render_template from a field works,
+            if a custom filter was defined"""
+
+        dag = DAG('test-dag',
+                  start_date=DEFAULT_DATE,
+                  user_defined_macros = dict(foo='bar'))
+
+        with dag:
+            task = DummyOperator(task_id='op1')
+
+        result = task.render_template('', '{{ foo }}', dict())
+        self.assertEqual(result, 'bar')
+
+    def test_user_defined_filters(self):
+        def jinja_udf(name):
+            return 'Hello %s' %name
+
+        dag = models.DAG('test-dag',
+                         start_date=DEFAULT_DATE,
+                         user_defined_filters=dict(hello=jinja_udf))
+        jinja_env = dag.get_template_env()
+
+        self.assertIn('hello', jinja_env.filters)
+        self.assertEqual(jinja_env.filters['hello'], jinja_udf)
+
+    def test_render_template_field_filter(self):
+        """ Tests if render_template from a field works,
+            if a custom filter was defined"""
+
+        def jinja_udf(name):
+            return 'Hello %s' %name
+
+        dag = DAG('test-dag',
+                  start_date=DEFAULT_DATE,
+                  user_defined_filters = dict(hello=jinja_udf))
+
+        with dag:
+            task = DummyOperator(task_id='op1')
+
+        result = task.render_template('', "{{ 'world' | hello}}", dict())
+        self.assertEqual(result, 'Hello world')
+
+
+class DagStatTest(unittest.TestCase):
+    def test_dagstats_crud(self):
+        DagStat.create(dag_id='test_dagstats_crud')
+
+        session = settings.Session()
+        qry = session.query(DagStat).filter(DagStat.dag_id == 'test_dagstats_crud')
+        self.assertEqual(len(qry.all()), len(State.dag_states))
+
+        DagStat.set_dirty(dag_id='test_dagstats_crud')
+        res = qry.all()
+
+        for stat in res:
+            self.assertTrue(stat.dirty)
+
+        # create missing
+        DagStat.set_dirty(dag_id='test_dagstats_crud_2')
+        qry2 = session.query(DagStat).filter(DagStat.dag_id == 'test_dagstats_crud_2')
+        self.assertEqual(len(qry2.all()), len(State.dag_states))
+
+        dag = DAG(
+            'test_dagstats_crud',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+
+        with dag:
+            op1 = DummyOperator(task_id='A')
+
+        now = datetime.datetime.now()
+        dr = dag.create_dagrun(
+            run_id='manual__' + now.isoformat(),
+            execution_date=now,
+            start_date=now,
+            state=State.FAILED,
+            external_trigger=False,
+        )
+
+        DagStat.update(dag_ids=['test_dagstats_crud'])
+        res = qry.all()
+        for stat in res:
+            if stat.state == State.FAILED:
+                self.assertEqual(stat.count, 1)
+            else:
+                self.assertEqual(stat.count, 0)
+
+        DagStat.update()
+        res = qry2.all()
+        for stat in res:
+            self.assertFalse(stat.dirty)
+
 class DagRunTest(unittest.TestCase):
+
+    def create_dag_run(self, dag, state=State.RUNNING, task_states=None, execution_date=None):
+        now = datetime.datetime.now()
+        if execution_date is None:
+            execution_date = now
+        dag_run = dag.create_dagrun(
+            run_id='manual__' + now.isoformat(),
+            execution_date=execution_date,
+            start_date=now,
+            state=state,
+            external_trigger=False,
+        )
+
+        if task_states is not None:
+            session = settings.Session()
+            for task_id, state in task_states.items():
+                ti = dag_run.get_task_instance(task_id)
+                ti.set_state(state, session)
+            session.close()
+
+        return dag_run
+
     def test_id_for_date(self):
         run_id = models.DagRun.id_for_date(
             datetime.datetime(2015, 1, 2, 3, 4, 5, 6, None))
-        assert run_id == 'scheduled__2015-01-02T03:04:05', (
+        self.assertEqual(
+            'scheduled__2015-01-02T03:04:05', run_id,
             'Generated run_id did not match expectations: {0}'.format(run_id))
+
+    def test_dagrun_find(self):
+        session = settings.Session()
+        now = datetime.datetime.now()
+
+        dag_id1 = "test_dagrun_find_externally_triggered"
+        dag_run = models.DagRun(
+            dag_id=dag_id1,
+            run_id='manual__' + now.isoformat(),
+            execution_date=now,
+            start_date=now,
+            state=State.RUNNING,
+            external_trigger=True,
+        )
+        session.add(dag_run)
+
+        dag_id2 = "test_dagrun_find_not_externally_triggered"
+        dag_run = models.DagRun(
+            dag_id=dag_id2,
+            run_id='manual__' + now.isoformat(),
+            execution_date=now,
+            start_date=now,
+            state=State.RUNNING,
+            external_trigger=False,
+        )
+        session.add(dag_run)
+
+        session.commit()
+
+        self.assertEqual(1, len(models.DagRun.find(dag_id=dag_id1, external_trigger=True)))
+        self.assertEqual(0, len(models.DagRun.find(dag_id=dag_id1, external_trigger=False)))
+        self.assertEqual(0, len(models.DagRun.find(dag_id=dag_id2, external_trigger=True)))
+        self.assertEqual(1, len(models.DagRun.find(dag_id=dag_id2, external_trigger=False)))
+
+    def test_dagrun_success_when_all_skipped(self):
+        """
+        Tests that a DAG run succeeds when all tasks are skipped
+        """
+        dag = DAG(
+            dag_id='test_dagrun_success_when_all_skipped',
+            start_date=datetime.datetime(2017, 1, 1)
+        )
+        dag_task1 = ShortCircuitOperator(
+            task_id='test_short_circuit_false',
+            dag=dag,
+            python_callable=lambda: False)
+        dag_task2 = DummyOperator(
+            task_id='test_state_skipped1',
+            dag=dag)
+        dag_task3 = DummyOperator(
+            task_id='test_state_skipped2',
+            dag=dag)
+        dag_task1.set_downstream(dag_task2)
+        dag_task2.set_downstream(dag_task3)
+
+        initial_task_states = {
+            'test_short_circuit_false': State.SUCCESS,
+            'test_state_skipped1': State.SKIPPED,
+            'test_state_skipped2': State.SKIPPED,
+        }
+
+        dag_run = self.create_dag_run(dag=dag,
+                                      state=State.RUNNING,
+                                      task_states=initial_task_states)
+        updated_dag_state = dag_run.update_state()
+        self.assertEqual(State.SUCCESS, updated_dag_state)
+
+    def test_dagrun_success_conditions(self):
+        session = settings.Session()
+
+        dag = DAG(
+            'test_dagrun_success_conditions',
+            start_date=DEFAULT_DATE,
+            default_args={'owner': 'owner1'})
+
+        # A -> B
+        # A -> C -> D
+        # ordered: B, D, C, A or D, B, C, A or D, C, B, A
+        with dag:
+            op1 = DummyOperator(task_id='A')
+            op2 = DummyOperator(task_id='B')
+            op3 = DummyOperator(task_id='C')
+            op4 = DummyOperator(task_id='D')
+            op1.set_upstream([op2, op3])
+            op3.set_upstream(op4)
+
+        dag.clear()
+
+        now = datetime.datetime.now()
+        dr = dag.create_dagrun(run_id='test_dagrun_success_conditions',
+                               state=State.RUNNING,
+                               execution_date=now,
+                               start_date=now)
+
+        # op1 = root
+        ti_op1 = dr.get_task_instance(task_id=op1.task_id)
+        ti_op1.set_state(state=State.SUCCESS, session=session)
+
+        ti_op2 = dr.get_task_instance(task_id=op2.task_id)
+        ti_op3 = dr.get_task_instance(task_id=op3.task_id)
+        ti_op4 = dr.get_task_instance(task_id=op4.task_id)
+
+        # root is successful, but unfinished tasks
+        state = dr.update_state()
+        self.assertEqual(State.RUNNING, state)
+
+        # one has failed, but root is successful
+        ti_op2.set_state(state=State.FAILED, session=session)
+        ti_op3.set_state(state=State.SUCCESS, session=session)
+        ti_op4.set_state(state=State.SUCCESS, session=session)
+        state = dr.update_state()
+        self.assertEqual(State.SUCCESS, state)
+
+        # upstream dependency failed, root has not run
+        ti_op1.set_state(State.NONE, session)
+        state = dr.update_state()
+        self.assertEqual(State.FAILED, state)
+
+    def test_get_task_instance_on_empty_dagrun(self):
+        """
+        Make sure that a proper value is returned when a dagrun has no task instances
+        """
+        dag = DAG(
+            dag_id='test_get_task_instance_on_empty_dagrun',
+            start_date=datetime.datetime(2017, 1, 1)
+        )
+        dag_task1 = ShortCircuitOperator(
+            task_id='test_short_circuit_false',
+            dag=dag,
+            python_callable=lambda: False)
+
+        session = settings.Session()
+
+        now = datetime.datetime.now()
+
+        # Don't use create_dagrun since it will create the task instances too which we
+        # don't want
+        dag_run = models.DagRun(
+            dag_id=dag.dag_id,
+            run_id='manual__' + now.isoformat(),
+            execution_date=now,
+            start_date=now,
+            state=State.RUNNING,
+            external_trigger=False,
+        )
+        session.add(dag_run)
+        session.commit()
+
+        ti = dag_run.get_task_instance('test_short_circuit_false')
+        self.assertEqual(None, ti)
+
+    def test_get_latest_runs(self):
+        session = settings.Session()
+        dag = DAG(
+            dag_id='test_latest_runs_1',
+            start_date=DEFAULT_DATE)
+        dag_1_run_1 = self.create_dag_run(dag,
+                execution_date=datetime.datetime(2015, 1, 1))
+        dag_1_run_2 = self.create_dag_run(dag,
+                execution_date=datetime.datetime(2015, 1, 2))
+        dagruns = models.DagRun.get_latest_runs(session)
+        session.close()
+        for dagrun in dagruns:
+            if dagrun.dag_id == 'test_latest_runs_1':
+                self.assertEqual(dagrun.execution_date, datetime.datetime(2015, 1, 2))
 
 
 class DagBagTest(unittest.TestCase):
@@ -139,10 +548,10 @@ class DagBagTest(unittest.TestCase):
         for dag_id in some_expected_dag_ids:
             dag = dagbag.get_dag(dag_id)
 
-            assert dag is not None
-            assert dag.dag_id == dag_id
+            self.assertIsNotNone(dag)
+            self.assertEqual(dag_id, dag.dag_id)
 
-        assert dagbag.size() >= 7
+        self.assertGreaterEqual(dagbag.size(), 7)
 
     def test_get_non_existing_dag(self):
         """
@@ -151,7 +560,7 @@ class DagBagTest(unittest.TestCase):
         dagbag = models.DagBag(include_examples=True)
 
         non_existing_dag_id = "non_existing_dag_id"
-        assert dagbag.get_dag(non_existing_dag_id) is None
+        self.assertIsNone(dagbag.get_dag(non_existing_dag_id))
 
     def test_process_file_that_contains_multi_bytes_char(self):
         """
@@ -163,7 +572,7 @@ class DagBagTest(unittest.TestCase):
         f.flush()
 
         dagbag = models.DagBag(include_examples=True)
-        assert dagbag.process_file(f.name) == []
+        self.assertEqual([], dagbag.process_file(f.name))
 
     def test_zip(self):
         """
@@ -171,7 +580,7 @@ class DagBagTest(unittest.TestCase):
         """
         dagbag = models.DagBag()
         dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_zip.zip"))
-        assert dagbag.get_dag("test_zip_dag")
+        self.assertTrue(dagbag.get_dag("test_zip_dag"))
 
     @patch.object(DagModel,'get_current')
     def test_get_dag_without_refresh(self, mock_dagmodel):
@@ -188,7 +597,7 @@ class DagBagTest(unittest.TestCase):
         class TestDagBag(models.DagBag):
             process_file_calls = 0
             def process_file(self, filepath, only_if_updated=True, safe_mode=True):
-                if 'example_bash_operator.py' in filepath:
+                if 'example_bash_operator.py' == os.path.basename(filepath):
                     TestDagBag.process_file_calls += 1
                 super(TestDagBag, self).process_file(filepath, only_if_updated, safe_mode)
 
@@ -196,12 +605,69 @@ class DagBagTest(unittest.TestCase):
         processed_files = dagbag.process_file_calls
 
         # Should not call process_file agani, since it's already loaded during init.
-        assert dagbag.process_file_calls == 1
-        assert dagbag.get_dag(dag_id) != None
-        assert dagbag.process_file_calls == 1
+        self.assertEqual(1, dagbag.process_file_calls)
+        self.assertIsNotNone(dagbag.get_dag(dag_id))
+        self.assertEqual(1, dagbag.process_file_calls)
+
+    def test_get_dag_fileloc(self):
+        """
+        Test that fileloc is correctly set when we load example DAGs,
+        specifically SubDAGs.
+        """
+        dagbag = models.DagBag(include_examples=True)
+
+        expected = {
+            'example_bash_operator': 'example_bash_operator.py',
+            'example_subdag_operator': 'example_subdag_operator.py',
+            'example_subdag_operator.section-1': 'subdags/subdag.py'
+        }
+
+        for dag_id, path in expected.items():
+            dag = dagbag.get_dag(dag_id)
+            self.assertTrue(
+                dag.fileloc.endswith('airflow/example_dags/' + path))
 
 
 class TaskInstanceTest(unittest.TestCase):
+
+    def test_set_task_dates(self):
+        """
+        Test that tasks properly take start/end dates from DAGs
+        """
+        dag = DAG('dag', start_date=DEFAULT_DATE, end_date=DEFAULT_DATE + datetime.timedelta(days=10))
+
+        op1 = DummyOperator(task_id='op_1', owner='test')
+
+        self.assertTrue(op1.start_date is None and op1.end_date is None)
+
+        # dag should assign its dates to op1 because op1 has no dates
+        dag.add_task(op1)
+        self.assertTrue(
+            op1.start_date == dag.start_date and op1.end_date == dag.end_date)
+
+        op2 = DummyOperator(
+            task_id='op_2',
+            owner='test',
+            start_date=DEFAULT_DATE - datetime.timedelta(days=1),
+            end_date=DEFAULT_DATE + datetime.timedelta(days=11))
+
+        # dag should assign its dates to op2 because they are more restrictive
+        dag.add_task(op2)
+        self.assertTrue(
+            op2.start_date == dag.start_date and op2.end_date == dag.end_date)
+
+        op3 = DummyOperator(
+            task_id='op_3',
+            owner='test',
+            start_date=DEFAULT_DATE + datetime.timedelta(days=1),
+            end_date=DEFAULT_DATE + datetime.timedelta(days=9))
+        # op3 should keep its dates because they are more restrictive
+        dag.add_task(op3)
+        self.assertTrue(
+            op3.start_date == DEFAULT_DATE + datetime.timedelta(days=1))
+        self.assertTrue(
+            op3.end_date == DEFAULT_DATE + datetime.timedelta(days=9))
+
 
     def test_set_dag(self):
         """
@@ -288,6 +754,19 @@ class TaskInstanceTest(unittest.TestCase):
         # dag assignment with __rrshift__
         dag >> op5
         self.assertIs(op5.dag, dag)
+
+    @patch.object(DAG, 'concurrency_reached')
+    def test_requeue_over_concurrency(self, mock_concurrency_reached):
+        mock_concurrency_reached.return_value = True
+
+        dag = DAG(dag_id='test_requeue_over_concurrency', start_date=DEFAULT_DATE,
+                  max_active_runs=1, concurrency=2)
+        task = DummyOperator(task_id='test_requeue_over_concurrency_op', dag=dag)
+
+        ti = TI(task=task, execution_date=datetime.datetime.now())
+        ti.run()
+        self.assertEqual(ti.state, models.State.NONE)
+
 
     @patch.object(TI, 'pool_full')
     def test_run_pooling_task(self, mock_pool_full):
@@ -438,9 +917,8 @@ class TaskInstanceTest(unittest.TestCase):
         self.assertEqual(ti.try_number, 4)
 
     def test_next_retry_datetime(self):
-        delay = datetime.timedelta(seconds=3)
-        delay_squared = datetime.timedelta(seconds=9)
-        max_delay = datetime.timedelta(seconds=10)
+        delay = datetime.timedelta(seconds=30)
+        max_delay = datetime.timedelta(minutes=60)
 
         dag = models.DAG(dag_id='fail_dag')
         task = BashOperator(
@@ -454,18 +932,29 @@ class TaskInstanceTest(unittest.TestCase):
             owner='airflow',
             start_date=datetime.datetime(2016, 2, 1, 0, 0, 0))
         ti = TI(
-            task=task, execution_date=datetime.datetime.now())
+            task=task, execution_date=DEFAULT_DATE)
         ti.end_date = datetime.datetime.now()
 
         ti.try_number = 1
         dt = ti.next_retry_datetime()
-        self.assertEqual(dt, ti.end_date+delay)
+        # between 30 * 2^0.5 and 30 * 2^1 (15 and 30)
+        self.assertEqual(dt, ti.end_date + datetime.timedelta(seconds=20.0))
 
-        ti.try_number = 2
+        ti.try_number = 4
         dt = ti.next_retry_datetime()
-        self.assertEqual(dt, ti.end_date+delay_squared)
+        # between 30 * 2^2 and 30 * 2^3 (120 and 240)
+        self.assertEqual(dt, ti.end_date + datetime.timedelta(seconds=181.0))
 
-        ti.try_number = 3
+        ti.try_number = 6
+        dt = ti.next_retry_datetime()
+        # between 30 * 2^4 and 30 * 2^5 (480 and 960)
+        self.assertEqual(dt, ti.end_date + datetime.timedelta(seconds=825.0))
+
+        ti.try_number = 9
+        dt = ti.next_retry_datetime()
+        self.assertEqual(dt, ti.end_date+max_delay)
+
+        ti.try_number = 50
         dt = ti.next_retry_datetime()
         self.assertEqual(dt, ti.end_date+max_delay)
 
@@ -631,3 +1120,29 @@ class TaskInstanceTest(unittest.TestCase):
                                       key=key,
                                       include_prior_dates=True),
                          value)
+
+    def test_post_execute_hook(self):
+        """
+        Test that post_execute hook is called with the Operator's result.
+        The result ('error') will cause an error to be raised and trapped.
+        """
+
+        class TestError(Exception):
+            pass
+
+        class TestOperator(PythonOperator):
+            def post_execute(self, context, result):
+                if result == 'error':
+                    raise TestError('expected error.')
+
+        dag = models.DAG(dag_id='test_post_execute_dag')
+        task = TestOperator(
+            task_id='test_operator',
+            dag=dag,
+            python_callable=lambda: 'error',
+            owner='airflow',
+            start_date=datetime.datetime(2017, 2, 1))
+        ti = TI(task=task, execution_date=datetime.datetime.now())
+
+        with self.assertRaises(TestError):
+            ti.run()

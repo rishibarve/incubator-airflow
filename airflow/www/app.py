@@ -19,8 +19,8 @@ import six
 from flask import Flask
 from flask_admin import Admin, base
 from flask_cache import Cache
-from flask_wtf.csrf import CsrfProtect
-csrf = CsrfProtect()
+from flask_wtf.csrf import CSRFProtect
+csrf = CSRFProtect()
 
 import airflow
 from airflow import models
@@ -102,7 +102,7 @@ def create_app(config=None, testing=False):
             url='http://pythonhosted.org/airflow/'))
         admin.add_link(
             base.MenuLink(category='Docs',
-                name='Github',url='https://github.com/airbnb/airflow'))
+                name='Github',url='https://github.com/apache/incubator-airflow'))
 
         av(vs.VersionView(name='Version', category="About"))
 

@@ -118,9 +118,24 @@ def policy(task_instance):
 
 
 def configure_logging(log_format=LOG_FORMAT):
-    logging.root.handlers = []
-    logging.basicConfig(
-        format=log_format, stream=sys.stdout, level=LOGGING_LEVEL)
+
+    def _configure_logging(logging_level):
+        global LOGGING_LEVEL
+        logging.root.handlers = []
+        logging.basicConfig(
+            format=log_format, stream=sys.stdout, level=logging_level)
+        LOGGING_LEVEL = logging_level
+
+    if "logging_level" in conf.as_dict()["core"]:
+        logging_level = conf.get('core', 'LOGGING_LEVEL').upper()
+    else:
+        logging_level = LOGGING_LEVEL
+    try:
+        _configure_logging(logging_level)
+    except ValueError:
+        logging.warning("Logging level {} is not defined. "
+                        "Use default.".format(logging_level))
+        _configure_logging(logging.INFO)
 
 
 def configure_vars():
@@ -143,7 +158,6 @@ def configure_orm(disable_connection_pool=False):
         engine_args['pool_size'] = conf.getint('core', 'SQL_ALCHEMY_POOL_SIZE')
         engine_args['pool_recycle'] = conf.getint('core',
                                                   'SQL_ALCHEMY_POOL_RECYCLE')
-        # engine_args['echo'] = True
 
     engine = create_engine(SQL_ALCHEMY_CONN, **engine_args)
     Session = scoped_session(
@@ -163,4 +177,5 @@ configure_orm()
 
 KILOBYTE = 1024
 MEGABYTE = KILOBYTE * KILOBYTE
-WEB_COLORS = {'LIGHTBLUE': '#4d9de0'}
+WEB_COLORS = {'LIGHTBLUE': '#4d9de0',
+              'LIGHTORANGE': '#FF9933'}

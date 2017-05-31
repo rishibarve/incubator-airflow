@@ -19,6 +19,7 @@ import logging
 import reprlib
 
 import os
+import socket
 import subprocess
 import textwrap
 import warnings
@@ -45,7 +46,7 @@ from airflow import api
 from airflow import jobs, settings
 from airflow import configuration as conf
 from airflow.exceptions import AirflowException
-from airflow.executors import DEFAULT_EXECUTOR
+from airflow.executors import GetDefaultExecutor
 from airflow.models import (DagModel, DagBag, TaskInstance,
                             DagPickle, DagRun, Variable, DagStat,
                             Pool, Connection)
@@ -58,10 +59,8 @@ from airflow.www.app import cached_app
 from sqlalchemy import func
 from sqlalchemy.orm import exc
 
-DAGS_FOLDER = os.path.expanduser(conf.get('core', 'DAGS_FOLDER'))
 
 api.load_auth()
-
 api_module = import_module(conf.get('cli', 'api_client'))
 api_client = api_module.Client(api_base_url=conf.get('cli', 'endpoint_url'),
                                auth=api.api_auth.client_auth)
@@ -114,11 +113,8 @@ def setup_locations(process, pid=None, stdout=None, stderr=None, log=None):
 
 
 def process_subdir(subdir):
-    dags_folder = conf.get("core", "DAGS_FOLDER")
-    dags_folder = os.path.expanduser(dags_folder)
     if subdir:
-        if "DAGS_FOLDER" in subdir:
-            subdir = subdir.replace("DAGS_FOLDER", dags_folder)
+        subdir = subdir.replace('DAGS_FOLDER', settings.DAGS_FOLDER)
         subdir = os.path.abspath(os.path.expanduser(subdir))
         return subdir
 
@@ -389,6 +385,9 @@ def run(args, dag=None):
             level=settings.LOGGING_LEVEL,
             format=settings.LOG_FORMAT)
 
+    hostname = socket.getfqdn()
+    logging.info("Running on host {}".format(hostname))
+
     if not args.pickle and not dag:
         dag = get_dag(args)
     elif not dag:
@@ -444,7 +443,7 @@ def run(args, dag=None):
                 print(e)
                 raise e
 
-        executor = DEFAULT_EXECUTOR
+        executor = GetDefaultExecutor()
         executor.start()
         print("Sending to executor.")
         executor.queue_task_instance(
@@ -741,7 +740,7 @@ def webserver(args):
     error_logfile = args.error_logfile or conf.get('webserver', 'error_logfile')
     num_workers = args.workers or conf.get('webserver', 'workers')
     worker_timeout = (args.worker_timeout or
-                      conf.get('webserver', 'webserver_worker_timeout'))
+                      conf.get('webserver', 'web_server_worker_timeout'))
     ssl_cert = args.ssl_cert or conf.get('webserver', 'web_server_ssl_cert')
     ssl_key = args.ssl_key or conf.get('webserver', 'web_server_ssl_key')
     if not ssl_cert and ssl_key:
@@ -756,9 +755,14 @@ def webserver(args):
             "Starting the web server on port {0} and host {1}.".format(
                 args.port, args.hostname))
         app.run(debug=True, port=args.port, host=args.hostname,
-                ssl_context=(ssl_cert, ssl_key))
+                ssl_context=(ssl_cert, ssl_key) if ssl_cert and ssl_key else None)
     else:
-        pid, stdout, stderr, log_file = setup_locations("webserver", pid=args.pid)
+        pid, stdout, stderr, log_file = setup_locations("webserver", args.pid, args.stdout, args.stderr, args.log_file)
+        if args.daemon:
+            handle = setup_logging(log_file)
+            stdout = open(stdout, 'w+')
+            stderr = open(stderr, 'w+')
+
         print(
             textwrap.dedent('''\
                 Running the Gunicorn Server with:
@@ -787,28 +791,66 @@ def webserver(args):
             run_args += ['--error-logfile', str(args.error_logfile)]
 
         if args.daemon:
-            run_args += ["-D"]
+            run_args += ['-D']
+
         if ssl_cert:
             run_args += ['--certfile', ssl_cert, '--keyfile', ssl_key]
 
         run_args += ["airflow.www.app:cached_app()"]
 
-        gunicorn_master_proc = subprocess.Popen(run_args)
+        gunicorn_master_proc = None
 
         def kill_proc(dummy_signum, dummy_frame):
             gunicorn_master_proc.terminate()
             gunicorn_master_proc.wait()
             sys.exit(0)
 
-        signal.signal(signal.SIGINT, kill_proc)
-        signal.signal(signal.SIGTERM, kill_proc)
+        def monitor_gunicorn(gunicorn_master_proc):
+            # These run forever until SIG{INT, TERM, KILL, ...} signal is sent
+            if conf.getint('webserver', 'worker_refresh_interval') > 0:
+                restart_workers(gunicorn_master_proc, num_workers)
+            else:
+                while True:
+                    time.sleep(1)
 
-        # These run forever until SIG{INT, TERM, KILL, ...} signal is sent
-        if conf.getint('webserver', 'worker_refresh_interval') > 0:
-            restart_workers(gunicorn_master_proc, num_workers)
+        if args.daemon:
+            base, ext = os.path.splitext(pid)
+            ctx = daemon.DaemonContext(
+                pidfile=TimeoutPIDLockFile(base + "-monitor" + ext, -1),
+                files_preserve=[handle],
+                stdout=stdout,
+                stderr=stderr,
+                signal_map={
+                    signal.SIGINT: kill_proc,
+                    signal.SIGTERM: kill_proc
+                },
+            )
+            with ctx:
+                subprocess.Popen(run_args)
+
+                # Reading pid file directly, since Popen#pid doesn't
+                # seem to return the right value with DaemonContext.
+                while True:
+                    try:
+                        with open(pid) as f:
+                            gunicorn_master_proc_pid = int(f.read())
+                            break
+                    except IOError:
+                        logging.debug("Waiting for gunicorn's pid file to be created.")
+                        time.sleep(0.1)
+
+                gunicorn_master_proc = psutil.Process(gunicorn_master_proc_pid)
+                monitor_gunicorn(gunicorn_master_proc)
+
+            stdout.close()
+            stderr.close()
         else:
-            while True:
-                time.sleep(1)
+            gunicorn_master_proc = subprocess.Popen(run_args)
+
+            signal.signal(signal.SIGINT, kill_proc)
+            signal.signal(signal.SIGTERM, kill_proc)
+
+            monitor_gunicorn(gunicorn_master_proc)
 
 
 def scheduler(args):
@@ -1128,7 +1170,7 @@ class CLIFactory(object):
         'subdir': Arg(
             ("-sd", "--subdir"),
             "File location or directory from which to look for the dag",
-            default=DAGS_FOLDER),
+            default=settings.DAGS_FOLDER),
         'start_date': Arg(
             ("-s", "--start_date"), "Override start_date YYYY-MM-DD",
             type=parsedate),
@@ -1365,7 +1407,7 @@ class CLIFactory(object):
             help="Set number of seconds to execute before exiting"),
         'num_runs': Arg(
             ("-n", "--num_runs"),
-            default=None, type=int,
+            default=-1, type=int,
             help="Set the number of runs to execute before exiting"),
         # worker
         'do_pickle': Arg(

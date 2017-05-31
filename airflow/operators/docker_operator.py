@@ -122,7 +122,7 @@ class DockerOperator(BaseOperator):
         self.tmp_dir = tmp_dir
         self.user = user
         self.volumes = volumes or []
-        self.xcom_push = xcom_push
+        self.xcom_push_flag = xcom_push
         self.xcom_all = xcom_all
 
         self.cli = None
@@ -175,14 +175,17 @@ class DockerOperator(BaseOperator):
 
             line = ''
             for line in self.cli.logs(container=self.container['Id'], stream=True):
-                logging.info("{}".format(line.strip()))
+                line = line.strip()
+                if hasattr(line, 'decode'):
+                    line = line.decode('utf-8')
+                logging.info(line)
 
             exit_code = self.cli.wait(self.container['Id'])
             if exit_code != 0:
                 raise AirflowException('docker container failed')
 
-            if self.xcom_push:
-                return self.cli.logs(container=self.container['Id']) if self.xcom_all else str(line.strip())
+            if self.xcom_push_flag:
+                return self.cli.logs(container=self.container['Id']) if self.xcom_all else str(line)
 
     def get_command(self):
         if self.command is not None and self.command.strip().find('[') == 0:

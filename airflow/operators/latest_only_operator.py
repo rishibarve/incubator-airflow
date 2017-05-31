@@ -34,7 +34,7 @@ class LatestOnlyOperator(BaseOperator):
     def execute(self, context):
         # If the DAG Run is externally triggered, then return without
         # skipping downstream tasks
-        if context['dag_run'].external_trigger:
+        if context['dag_run'] and context['dag_run'].external_trigger:
             logging.info("""Externally triggered DAG_Run:
                          allowing execution to proceed.""")
             return
@@ -46,19 +46,43 @@ class LatestOnlyOperator(BaseOperator):
         logging.info(
             'Checking latest only with left_window: %s right_window: %s '
             'now: %s', left_window, right_window, now)
+
         if not left_window < now <= right_window:
             logging.info('Not latest execution, skipping downstream.')
-            session = settings.Session()
-            for task in context['task'].downstream_list:
-                ti = TaskInstance(
-                    task, execution_date=context['ti'].execution_date)
-                logging.info('Skipping task: %s', ti.task_id)
-                ti.state = State.SKIPPED
-                ti.start_date = now
-                ti.end_date = now
-                session.merge(ti)
-            session.commit()
-            session.close()
+            downstream_task_ids = context['task'].downstream_task_ids
+            if downstream_task_ids:
+                session = settings.Session()
+                TI = TaskInstance
+                tis = session.query(TI).filter(
+                    TI.execution_date == context['ti'].execution_date,
+                    TI.task_id.in_(downstream_task_ids)
+                ).with_for_update().all()
+
+                for ti in tis:
+                    logging.info('Skipping task: %s', ti.task_id)
+                    ti.state = State.SKIPPED
+                    ti.start_date = now
+                    ti.end_date = now
+                    session.merge(ti)
+
+                # this is defensive against dag runs that are not complete
+                for task in context['task'].downstream_list:
+                    if task.task_id in tis:
+                        continue
+
+                    logging.warning("Task {} was not part of a dag run. "
+                                    "This should not happen."
+                                    .format(task))
+                    now = datetime.datetime.now()
+                    ti = TaskInstance(task, execution_date=context['ti'].execution_date)
+                    ti.state = State.SKIPPED
+                    ti.start_date = now
+                    ti.end_date = now
+                    session.merge(ti)
+
+                session.commit()
+                session.close()
+
             logging.info('Done.')
         else:
             logging.info('Latest, allowing execution to proceed.')

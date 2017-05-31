@@ -21,5 +21,5 @@ class Client(api_client.Client):
         dr = trigger_dag.trigger_dag(dag_id=dag_id,
                                      run_id=run_id,
                                      conf=conf,
-                                     execution_date=None)
+                                     execution_date=execution_date)
         return "Created {}".format(dr)

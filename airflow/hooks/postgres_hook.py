@@ -19,14 +19,18 @@ from airflow.hooks.dbapi_hook import DbApiHook
 
 
 class PostgresHook(DbApiHook):
-    '''
+    """
     Interact with Postgres.
     You can specify ssl parameters in the extra field of your connection
     as ``{"sslmode": "require", "sslcert": "/path/to/cert.pem", etc}``.
-    '''
+    """
     conn_name_attr = 'postgres_conn_id'
     default_conn_name = 'postgres_default'
     supports_autocommit = True
+
+    def __init__(self, *args, **kwargs):
+        super(PostgresHook, self).__init__(*args, **kwargs)
+        self.schema = kwargs.pop("schema", None)
 
     def get_conn(self):
         conn = self.get_connection(self.postgres_conn_id)
@@ -34,7 +38,7 @@ class PostgresHook(DbApiHook):
             host=conn.host,
             user=conn.login,
             password=conn.password,
-            dbname=conn.schema,
+            dbname=self.schema or conn.schema,
             port=conn.port)
         # check for ssl parameters in conn.extra
         for arg_name, arg_val in conn.extra_dejson.items():
@@ -46,14 +50,17 @@ class PostgresHook(DbApiHook):
     @staticmethod
     def _serialize_cell(cell, conn):
         """
-        Returns the Postgres literal of the cell as a string.
+        Postgresql will adapt all arguments to the execute() method internally,
+        hence we return cell without any conversion.
+        
+        See http://initd.org/psycopg/docs/advanced.html#adapting-new-types for 
+        more information.
 
         :param cell: The cell to insert into the table
         :type cell: object
         :param conn: The database connection
         :type conn: connection object
-        :return: The serialized cell
-        :rtype: str
+        :return: The cell
+        :rtype: object
         """
-
-        return psycopg2.extensions.adapt(cell).getquoted().decode('utf-8')
+        return cell

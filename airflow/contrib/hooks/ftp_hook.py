@@ -226,7 +226,12 @@ class FTPHook(BaseHook):
     def get_mod_time(self, path):
         conn = self.get_conn()
         ftp_mdtm = conn.sendcmd('MDTM ' + path)
-        return datetime.datetime.strptime(ftp_mdtm[4:], '%Y%m%d%H%M%S')
+        time_val = ftp_mdtm[4:]
+        # time_val optionally has microseconds
+        try:
+            return datetime.datetime.strptime(time_val, "%Y%m%d%H%M%S.%f")
+        except ValueError:
+            return datetime.datetime.strptime(time_val, '%Y%m%d%H%M%S')
 
 
 class FTPSHook(FTPHook):
@@ -237,7 +242,12 @@ class FTPSHook(FTPHook):
         """
         if self.conn is None:
             params = self.get_connection(self.ftp_conn_id)
+
+            if params.port:
+               ftplib.FTP_TLS.port=params.port
+
             self.conn = ftplib.FTP_TLS(
                 params.host, params.login, params.password
             )
+
         return self.conn

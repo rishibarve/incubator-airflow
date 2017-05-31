@@ -22,16 +22,10 @@ from functools import wraps
 import logging
 import os
 
-from alembic.config import Config
-from alembic import command
-from alembic.migration import MigrationContext
-
 from sqlalchemy import event, exc
 from sqlalchemy.pool import Pool
 
 from airflow import settings
-from airflow import configuration
-
 
 def provide_session(func):
     """
@@ -177,6 +171,10 @@ def initdb():
             host='localhost', port=5433))
     merge_conn(
         models.Connection(
+            conn_id='wasb_default', conn_type='wasb',
+            extra='{"sas_token": null}'))
+    merge_conn(
+        models.Connection(
             conn_id='webhdfs_default', conn_type='hdfs',
             host='localhost', port=50070))
     merge_conn(
@@ -191,6 +189,19 @@ def initdb():
         models.Connection(
             conn_id='aws_default', conn_type='aws',
             extra='{"region_name": "us-east-1"}'))
+    merge_conn(
+        models.Connection(
+            conn_id='spark_default', conn_type='spark',
+            host='yarn', extra='{"queue": "root.default"}'))
+    merge_conn(
+        models.Connection(
+            conn_id='redis_default', conn_type='redis',
+            host='localhost', port=6379,
+            extra='{"db": 0}'))
+    merge_conn(
+        models.Connection(
+            conn_id='sqoop_default', conn_type='sqoop',
+            host='rmdbs', extra=''))
     merge_conn(
         models.Connection(
             conn_id='emr_default', conn_type='emr',
@@ -238,6 +249,10 @@ def initdb():
                     ]
                 }
             '''))
+    merge_conn(
+        models.Connection(
+            conn_id='databricks_default', conn_type='databricks',
+            host='localhost'))
 
     # Known event types
     KET = models.KnownEventType
@@ -281,14 +296,17 @@ def initdb():
 
 
 def upgradedb():
+    # alembic adds significant import time, so we import it lazily
+    from alembic import command
+    from alembic.config import Config
+
     logging.info("Creating tables")
     current_dir = os.path.dirname(os.path.abspath(__file__))
     package_dir = os.path.normpath(os.path.join(current_dir, '..'))
     directory = os.path.join(package_dir, 'migrations')
     config = Config(os.path.join(package_dir, 'alembic.ini'))
     config.set_main_option('script_location', directory)
-    config.set_main_option('sqlalchemy.url',
-                           configuration.get('core', 'SQL_ALCHEMY_CONN'))
+    config.set_main_option('sqlalchemy.url', settings.SQL_ALCHEMY_CONN)
     command.upgrade(config, 'heads')
 
 
@@ -297,6 +315,8 @@ def resetdb():
     Clear out the database
     '''
     from airflow import models
+    # alembic adds significant import time, so we import it lazily
+    from alembic.migration import MigrationContext
 
     logging.info("Dropping tables that exist")
     models.Base.metadata.drop_all(settings.engine)
